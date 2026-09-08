@@ -6,6 +6,7 @@ Both server.py (MCP stdio) and api.py (FastAPI) import from here.
 
 import json
 import logging
+import os
 import sqlite3
 import time
 import urllib.parse
@@ -17,7 +18,7 @@ from typing import Optional
 
 # ─── Config ─────────────────────────────────────────────────────────────────
 
-DB_PATH = Path(__file__).parent / "datacube.db"
+DB_PATH = Path(os.environ.get("DATACUBE_DB_PATH", str(Path(__file__).parent / "datacube.db")))
 API_BASE = "https://data.statistics.sk/api/v2"
 LANG = "sk"
 API_TIMEOUT = 30

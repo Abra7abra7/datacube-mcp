@@ -14,9 +14,9 @@ services:
       - DATACUBE_RATE_LIMIT=${DATACUBE_RATE_LIMIT:-100/minute}
       - DATACUBE_HOST=0.0.0.0
       - DATACUBE_PORT=8000
+      - DATACUBE_DB_PATH=/data/datacube.db
     volumes:
       - datacube-data:/data
-      - datacube-db:/app/datacube.db
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
@@ -26,4 +26,3 @@ services:
 
 volumes:
   datacube-data:
-  datacube-db:
