@@ -7,9 +7,8 @@ services:
     build: .
     image: datacube-mcp:latest
     container_name: datacube-api
-    ports:
-      - "8000:8000"
     environment:
+      # Coolify maps ports via internal proxy — no host port needed
       - DATACUBE_API_KEY=${DATACUBE_API_KEY:-}
       - DATACUBE_CORS_ORIGINS=${DATACUBE_CORS_ORIGINS:-}
       - DATACUBE_RATE_LIMIT=${DATACUBE_RATE_LIMIT:-100/minute}
