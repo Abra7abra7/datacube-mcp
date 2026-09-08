@@ -1,5 +1,7 @@
-# DATAcube production stack
-# Usage: docker compose up -d
+# DATAcube production stack — Coolify-native
+# Usage: docker compose -f docker-compose.yml up -d
+#   DATACUBE_ADMIN_KEY=mysecret docker compose up -d
+# NO explicit ports — Coolify proxy handles routing
 
 services:
   datacube-api:
@@ -7,10 +9,9 @@ services:
     image: datacube-mcp:latest
     container_name: datacube-api
     environment:
-      # Coolify maps ports via internal proxy — no host port needed
-      - DATACUBE_ADMIN_KEY=dc_admin_6b9e2ae10b062fc6aeb3735f9e2857c6
-      - DATACUBE_CORS_ORIGINS=https://datacube.marianstancik.dev
-      - DATACUBE_RATE_LIMIT=100/minute
+      - DATACUBE_ADMIN_KEY=${DATACUBE_ADMIN_KEY:-}
+      - DATACUBE_CORS_ORIGINS=${DATACUBE_CORS_ORIGINS:-https://datacube.marianstancik.dev}
+      - DATACUBE_RATE_LIMIT=${DATACUBE_RATE_LIMIT:-100/minute}
       - DATACUBE_HOST=0.0.0.0
       - DATACUBE_PORT=8000
       - DATACUBE_DB_PATH=/data/datacube.db
@@ -19,13 +20,12 @@ services:
     volumes:
       - datacube-data:/data
     restart: unless-stopped
-    ports:
-      - '8000:8000'
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 60s
 
 volumes:
   datacube-data:
