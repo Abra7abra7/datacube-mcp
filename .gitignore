@@ -2,3 +2,4 @@ datacube.db
 __pycache__/
 *.pyc
 .env
+datacube-mcp.tar.gz

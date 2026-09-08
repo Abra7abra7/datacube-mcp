@@ -1,0 +1,90 @@
+name: Deploy DATAcube
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Copy DB for tests
+        run: |
+          if [ -f datacube.db ]; then
+            echo "DB already present"
+          else
+            echo "No DB in repo — tests will verify startup only"
+          fi
+      - name: Test server startup
+        run: |
+          python -c "
+          from core import db_exists
+          print(f'DB exists: {db_exists()}')
+          "
+      - name: Test MCP tools list
+        run: |
+          python -c "
+          import json, subprocess, sys
+          proc = subprocess.Popen([sys.executable, 'server.py'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+          proc.stdin.write(json.dumps({'jsonrpc':'2.0','id':1,'method':'list_tools'})+'\n')
+          proc.stdin.flush()
+          resp = json.loads(proc.stdout.readline())
+          tools = resp['result']['tools']
+          assert len(tools) == 6, f'Expected 6 tools, got {len(tools)}'
+          names = [t['name'] for t in tools]
+          assert 'list_cubes' in names
+          assert 'cube_query' in names
+          print(f'OK: {len(tools)} tools verified: {names}')
+          proc.kill()
+          "
+
+  build-and-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: |
+          docker build -t datacube-mcp:latest .
+          docker save datacube-mcp:latest | gzip > datacube-mcp.tar.gz
+
+      - name: Deploy to Coolify
+        if: secrets.COOLIFY_WEBHOOK != ''
+        run: |
+          curl -X POST "${{ secrets.COOLIFY_WEBHOOK }}"
+          echo "Coolify deploy triggered"
+
+      - name: Deploy to Hetzner VPS (SSH)
+        if: secrets.VPS_SSH_KEY != ''
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            datacube-mcp.tar.gz \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/
+          
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "cd /opt/datacube-mcp && \
+             tar xzf /tmp/datacube-mcp.tar.gz -C /tmp/ && \
+             docker load < /tmp/datacube-mcp.tar.gz && \
+             docker compose down 2>/dev/null || true && \
+             docker compose up -d && \
+             rm -f /tmp/datacube-mcp.tar.gz"
+
+      - name: Deploy to Railway
+        if: secrets.RAILWAY_TOKEN != ''
+        run: |
+          npx @railway/cli deploy --token=${{ secrets.RAILWAY_TOKEN }}
