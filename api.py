@@ -41,7 +41,8 @@ from core import (
     tool_list_cubes, tool_cube_dimensions, tool_cube_query,
     tool_find_cube, tool_ingest_status, tool_ingest_run,
     create_api_key, validate_api_key, list_api_keys, revoke_api_key,
-    get_rate_limit_for_key, init_keys_table, get_conn, init_db, DB_PATH
+    get_rate_limit_for_key, init_keys_table, get_conn, init_db, DB_PATH,
+    get_pending_emails, mark_email_sent
 )
 
 # ─── Config ─────────────────────────────────────────────────────────────────
@@ -314,6 +315,23 @@ async def revoke_key(
     if not success:
         raise HTTPException(status_code=404, detail="Key not found")
     return {"status": "revoked", "api_key": api_key[:8] + "..."}
+
+@app.get("/api/keys/pending-emails")
+async def pending_emails(
+    admin_verified: bool = Depends(verify_admin_key),
+):
+    """Get keys that need email delivery (admin)."""
+    keys = get_pending_emails()
+    return {"keys": keys, "count": len(keys)}
+
+@app.post("/api/keys/mark-sent")
+async def mark_sent(
+    api_key: str,
+    admin_verified: bool = Depends(verify_admin_key),
+):
+    """Mark a key's email as sent."""
+    mark_email_sent(api_key)
+    return {"status": "ok", "api_key": api_key[:8] + "..."}
 
 # ─── Stripe Webhook ─────────────────────────────────────────────────────────
 

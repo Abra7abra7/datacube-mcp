@@ -178,6 +178,7 @@ def init_keys_table(conn: sqlite3.Connection):
             customer_name   TEXT DEFAULT '',
             rate_limit      TEXT NOT NULL DEFAULT '1000/day',
             is_active       INTEGER NOT NULL DEFAULT 1,
+            email_sent      INTEGER NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
             expires_at      TEXT,
             last_used_at    TEXT,
@@ -275,7 +276,25 @@ def get_rate_limit_for_key(api_key: str) -> str:
         return key_info.get("rate_limit", "1000/day")
     return "1000/day"
 
-# ─── Tool functions (shared by MCP + HTTP) ──────────────────────────────────
+def get_pending_emails() -> list[dict]:
+    """Get API keys that need email sent."""
+    conn = get_conn()
+    init_keys_table(conn)
+    cur = conn.execute(
+        "SELECT * FROM api_keys WHERE email_sent = 0 ORDER BY created_at ASC"
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+def mark_email_sent(api_key: str) -> bool:
+    """Mark a key's email as sent."""
+    conn = get_conn()
+    init_keys_table(conn)
+    conn.execute("UPDATE api_keys SET email_sent = 1 WHERE api_key = ?", (api_key,))
+    conn.commit()
+    conn.close()
+    return True
 
 def tool_list_cubes(search: str = "") -> list[dict]:
     """List available cubes, optionally filtered by label search."""
