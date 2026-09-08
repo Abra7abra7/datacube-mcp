@@ -1,0 +1,30 @@
+# DATAcube production stack
+# Usage: docker compose up -d
+#   DATACUBE_API_KEY=mysecret docker compose up -d
+
+services:
+  datacube-api:
+    build: .
+    image: datacube-mcp:latest
+    container_name: datacube-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATACUBE_API_KEY=${DATACUBE_API_KEY:-}
+      - DATACUBE_CORS_ORIGINS=${DATACUBE_CORS_ORIGINS:-}
+      - DATACUBE_RATE_LIMIT=${DATACUBE_RATE_LIMIT:-100/minute}
+      - DATACUBE_HOST=0.0.0.0
+      - DATACUBE_PORT=8000
+    volumes:
+      - datacube-data:/data
+      - datacube-db:/app/datacube.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  datacube-data:
+  datacube-db:
