@@ -85,7 +85,7 @@ async def verify_admin_key(x_api_key: str = Header(None)):
 async def verify_stripe_signature(request: Request):
     """Verify Stripe webhook signature."""
     if not STRIPE_WEBHOOK_SECRET:
-        raise HTTPException(status_code=500, detail="Stripe webhook secret not configured")
+        raise HTTPException(status_code=501, detail="Stripe webhook secret not configured → add STRIPE_WEBHOOK_SECRET env var")
     
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
