@@ -1,17 +1,19 @@
 """DATAcube core — shared logic between MCP and HTTP layers.
 
-Config, API helpers, DB access, ingest, and all tool functions.
+Config, API helpers, DB access, ingest, tool functions, and API key management.
 Both server.py (MCP stdio) and api.py (FastAPI) import from here.
 """
 
+import hashlib
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
-import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -163,6 +165,116 @@ def run_ingest() -> dict:
     log.info("Done: %d cubes, %d dim values (%.1fs)", c_count, v_count, time.time() - t0)
     return {"cubes": c_count, "dim_values": v_count, "duration_s": round(time.time() - t0, 1)}
 
+# ─── API Key Management ─────────────────────────────────────────────────────
+
+def init_keys_table(conn: sqlite3.Connection):
+    """Create api_keys table if it doesn't exist."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            api_key         TEXT UNIQUE NOT NULL,
+            plan_tier       TEXT NOT NULL DEFAULT 'starter',
+            customer_email  TEXT NOT NULL,
+            customer_name   TEXT DEFAULT '',
+            rate_limit      TEXT NOT NULL DEFAULT '1000/day',
+            is_active       INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at      TEXT,
+            last_used_at    TEXT,
+            request_count   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys(api_key);
+        CREATE INDEX IF NOT EXISTS idx_api_keys_email ON api_keys(customer_email);
+    """)
+    conn.commit()
+
+def generate_api_key() -> str:
+    """Generate a secure random API key with 'dc_' prefix."""
+    return "dc_" + secrets.token_hex(32)
+
+def create_api_key(plan_tier: str, customer_email: str, customer_name: str = "") -> dict:
+    """Create a new API key for a customer. Returns the key info."""
+    conn = get_conn()
+    init_keys_table(conn)
+    
+    rate_limits = {
+        "developer": "100/day",
+        "starter": "1000/day",
+        "business": "10000/day",
+    }
+    rate_limit = rate_limits.get(plan_tier, "1000/day")
+    
+    api_key = generate_api_key()
+    conn.execute(
+        "INSERT INTO api_keys (api_key, plan_tier, customer_email, customer_name, rate_limit) VALUES (?, ?, ?, ?, ?)",
+        (api_key, plan_tier, customer_email, customer_name, rate_limit)
+    )
+    conn.commit()
+    
+    cur = conn.execute("SELECT * FROM api_keys WHERE api_key = ?", (api_key,))
+    row = dict(cur.fetchone())
+    conn.close()
+    return row
+
+def validate_api_key(api_key: str) -> Optional[dict]:
+    """Validate an API key. Returns key info or None."""
+    if not api_key:
+        return None
+    conn = get_conn()
+    init_keys_table(conn)
+    cur = conn.execute(
+        "SELECT * FROM api_keys WHERE api_key = ? AND is_active = 1",
+        (api_key,)
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return None
+    
+    key_info = dict(row)
+    
+    # Check expiry
+    if key_info["expires_at"]:
+        expires = datetime.fromisoformat(key_info["expires_at"])
+        if datetime.now(timezone.utc) > expires.replace(tzinfo=timezone.utc) if expires.tzinfo is None else datetime.now(timezone.utc) > expires:
+            conn.close()
+            return None
+    
+    # Update last_used_at and increment request count
+    conn.execute(
+        "UPDATE api_keys SET last_used_at = datetime('now'), request_count = request_count + 1 WHERE id = ?",
+        (key_info["id"],)
+    )
+    conn.commit()
+    conn.close()
+    return key_info
+
+def list_api_keys() -> list[dict]:
+    """List all API keys (admin)."""
+    conn = get_conn()
+    init_keys_table(conn)
+    cur = conn.execute("SELECT * FROM api_keys ORDER BY created_at DESC")
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+def revoke_api_key(api_key: str) -> bool:
+    """Revoke an API key."""
+    conn = get_conn()
+    init_keys_table(conn)
+    cur = conn.execute("UPDATE api_keys SET is_active = 0 WHERE api_key = ?", (api_key,))
+    affected = cur.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+def get_rate_limit_for_key(api_key: str) -> str:
+    """Get the rate limit string for a given key."""
+    key_info = validate_api_key(api_key)
+    if key_info:
+        return key_info.get("rate_limit", "1000/day")
+    return "1000/day"
+
 # ─── Tool functions (shared by MCP + HTTP) ──────────────────────────────────
 
 def tool_list_cubes(search: str = "") -> list[dict]:
@@ -271,11 +383,20 @@ def tool_ingest_status() -> dict:
     last_cache = cur.fetchone()[0]
     cur = conn.execute("SELECT MAX(updated) FROM cubes")
     last_update = cur.fetchone()[0]
+    
+    # API key stats
+    init_keys_table(conn)
+    cur = conn.execute("SELECT COUNT(*) FROM api_keys")
+    total_keys = cur.fetchone()[0]
+    cur = conn.execute("SELECT COUNT(*) FROM api_keys WHERE is_active = 1")
+    active_keys = cur.fetchone()[0]
+    
     conn.close()
     return {
         "status": "ready", "cubes": cubes, "dim_values": dims,
         "last_cube_update": last_update, "last_cache_fetch": last_cache,
-        "db_size_mb": round(DB_PATH.stat().st_size / 1_048_576, 1)
+        "db_size_mb": round(DB_PATH.stat().st_size / 1_048_576, 1),
+        "api_keys": {"total": total_keys, "active": active_keys}
     }
 
 def tool_ingest_run() -> dict:
