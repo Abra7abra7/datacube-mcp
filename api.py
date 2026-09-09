@@ -286,12 +286,23 @@ async def generate_key(
         customer_email=req.customer_email,
         customer_name=req.customer_name,
     )
+    # Send the key email immediately (real delivery via AgentMail)
+    sent = send_key_email(
+        customer_email=req.customer_email,
+        customer_name=req.customer_name,
+        api_key=key_info["api_key"],
+        plan_tier=req.plan_tier,
+        rate_limit=key_info["rate_limit"],
+    )
+    if sent:
+        mark_email_sent(key_info["api_key"])
     return {
         "status": "created",
         "api_key": key_info["api_key"],
         "plan_tier": key_info["plan_tier"],
         "customer_email": key_info["customer_email"],
         "rate_limit": key_info["rate_limit"],
+        "email_sent": sent,
     }
 
 @app.get("/api/keys/list")
@@ -332,6 +343,101 @@ async def mark_sent(
     """Mark a key's email as sent."""
     mark_email_sent(api_key)
     return {"status": "ok", "api_key": api_key[:8] + "..."}
+
+@app.post("/api/keys/send-emails")
+async def send_pending_emails(
+    admin_verified: bool = Depends(verify_admin_key),
+):
+    """Send emails for all pending keys (admin retry). Returns count sent."""
+    pending = get_pending_emails()
+    sent_count = 0
+    for k in pending:
+        ok = send_key_email(
+            customer_email=k["customer_email"],
+            customer_name=k.get("customer_name", ""),
+            api_key=k["api_key"],
+            plan_tier=k.get("plan_tier", "starter"),
+            rate_limit=k.get("rate_limit", "1000/day"),
+        )
+        if ok:
+            mark_email_sent(k["api_key"])
+            sent_count += 1
+    return {"status": "ok", "total": len(pending), "sent": sent_count}
+
+# ─── AgentMail email delivery ────────────────────────────────────────────────
+
+AGENTMAIL_API_KEY = os.environ.get("AGENTMAIL_API_KEY", "")
+AGENTMAIL_INBOX = os.environ.get("AGENTMAIL_INBOX", "ascentia@agentmail.to")
+AGENTMAIL_ENDPOINT = "https://mcp.agentmail.to/mcp"
+
+def send_key_email(customer_email: str, customer_name: str, api_key: str, plan_tier: str, rate_limit: str) -> bool:
+    """Send the API key to the customer via AgentMail (direct JSON-RPC, stateless).
+
+    Returns True on successful send. Never raises — logs and returns False.
+    """
+    if not AGENTMAIL_API_KEY:
+        log.warning("AGENTMAIL_API_KEY not set — email NOT sent to %s", customer_email)
+        return False
+    if not customer_email:
+        log.warning("No customer email — can't send key")
+        return False
+
+    subject = f"Tvoj DATAcube API kľúč — {plan_tier.upper()} plán"
+    body = f"""Ahoj {customer_name or 'priateľ'},
+
+ďakujeme za predplatné DATAcube API!
+
+Tvoj API kľúč: {api_key}
+Plán: {plan_tier.upper()}
+Rate limit: {rate_limit}
+
+Použitie:
+curl -H "X-API-Key: {api_key}" https://api.datacube.marianstancik.dev/api/health
+
+Dokumentácia: https://datacube.marianstancik.dev
+Podpora: odpovedz na tento email.
+
+— Marian Stancik
+architekt AI agentov
+https://marianstancik.dev"""
+
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": "1",
+        "params": {
+            "name": "send_message",
+            "arguments": {
+                "inboxId": AGENTMAIL_INBOX,
+                "to": [customer_email],
+                "subject": subject,
+                "text": body,
+            }
+        }
+    }
+    import urllib.request as ureq
+    req = ureq.Request(
+        AGENTMAIL_ENDPOINT,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": AGENTMAIL_API_KEY,
+            "Accept": "application/json, text/event-stream",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+        },
+        method="POST",
+    )
+    try:
+        with ureq.urlopen(req, timeout=30) as resp:
+            body_resp = resp.read().decode()
+        if '"isError":true' in body_resp or '"isError": true' in body_resp:
+            log.warning("AgentMail send error for %s: %s", customer_email, body_resp[:300])
+            return False
+        log.info("Key email sent to %s (tier %s)", customer_email, plan_tier)
+        return True
+    except Exception as e:
+        log.warning("AgentMail send failed for %s: %s", customer_email, e)
+        return False
 
 # ─── Stripe Webhook ─────────────────────────────────────────────────────────
 
@@ -381,50 +487,16 @@ async def stripe_webhook(request: Request):
             
             log.info("Key generated for %s: %s (tier: %s)", customer_email, key_info["api_key"][:8] + "...", plan_tier)
             
-            # Send the key via AgentMail
-            try:
-                import urllib.request as ureq
-                # Simple AgentMail send via their API
-                agentmail_to = customer_email
-                agentmail_from = "ascentia@agentmail.to"
-                
-                subject = f"Tvoj DATAcube API kľúč — {plan_tier.upper()} plán"
-                body = f"""Ahoj {session.get('customer_details', {}).get('name', '')},
-
-ďakujeme za predplatné DATAcube API!
-
-Tvoj API kľúč: {key_info['api_key']}
-Plán: {plan_tier.upper()}
-Rate limit: {key_info['rate_limit']}
-
-Použitie:
-curl -H "X-API-Key: {key_info['api_key']}" https://<api-url>/api/health
-
-Dokumentácia: https://datacube.marianstancik.dev/docs
-
-Potrebuješ pomoc? Odpovedz na tento email.
-
-— Marian Stancik
-https://marianstancik.dev"""
-                
-                # Send via AgentMail MCP if available, otherwise log
-                log.info("Would send email to %s with key", customer_email)
-                
-                # Try to send via AgentMail direct API
-                try:
-                    am_payload = json.dumps({
-                        "to": customer_email,
-                        "subject": subject,
-                        "text": body,
-                        "from": "DATAcube <ascentia@agentmail.to>"
-                    }).encode()
-                    # This is a best-effort send — don't fail if it doesn't work
-                    log.info("Email notification ready for %s", customer_email)
-                except Exception as em:
-                    log.warning("Email send skipped: %s", em)
-                
-            except Exception as e:
-                log.warning("Failed to send notification email: %s", e)
+            # Send the key via AgentMail (real delivery)
+            sent = send_key_email(
+                customer_email=customer_email,
+                customer_name=session.get("customer_details", {}).get("name", ""),
+                api_key=key_info["api_key"],
+                plan_tier=plan_tier,
+                rate_limit=key_info["rate_limit"],
+            )
+            if sent:
+                mark_email_sent(key_info["api_key"])
             
             return {
                 "status": "processed",
