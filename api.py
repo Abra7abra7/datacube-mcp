@@ -457,7 +457,9 @@ async def stripe_webhook(request: Request):
         stripe.api_key = STRIPE_SECRET_KEY
         
         try:
-            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+            event = stripe.Webhook.construct_event(
+                payload, sig_header, STRIPE_WEBHOOK_SECRET
+            ).to_dict()
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid payload")
         except stripe.error.SignatureVerificationError:
