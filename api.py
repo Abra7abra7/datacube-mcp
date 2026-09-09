@@ -32,7 +32,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Request, Depends, Header
+from fastapi import FastAPI, HTTPException, Request, Depends, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -255,7 +255,7 @@ async def find_cube(
     return {"results": result, "query": q}
 
 @app.get("/api/status")
-async def ingest_status(
+async def api_status(
     key_info: dict = Depends(verify_api_key),
 ):
     """Get database status."""
@@ -263,15 +263,66 @@ async def ingest_status(
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
     return tool_ingest_status()
 
-@app.post("/api/ingest")
+# ─── Async ingest (background, neblokuje API) ───────────────────────────────
+
+_INGEST_STATE = {
+    "running": False,
+    "last_started_at": None,
+    "last_finished_at": None,
+    "last_result": None,
+    "last_error": None,
+}
+
+def _run_ingest_background():
+    """Spustí ingest na pozadí — API ostane responsive (rýchla odpoveď)."""
+    try:
+        result = tool_ingest_run()
+        _INGEST_STATE.update(
+            running=False,
+            last_finished_at=datetime.now(timezone.utc).isoformat(),
+            last_result=result,
+            last_error=None,
+        )
+        log.info("Async ingest finished: %s", result)
+    except Exception as e:
+        log.exception("Async ingest failed")
+        _INGEST_STATE.update(
+            running=False,
+            last_finished_at=datetime.now(timezone.utc).isoformat(),
+            last_result=None,
+            last_error=str(e),
+        )
+
+@app.post("/api/ingest", status_code=202)
 async def ingest_run(
     key_info: dict = Depends(verify_api_key),
+    background_tasks: BackgroundTasks = None,
 ):
-    """Run a full ingest from ŠÚ SR (takes ~2-5 minutes)."""
+    """Spustí full ingest zo ŠÚ SR na pozadí — vráti 202 okamžite."""
     if not check_rate_limit(key_info):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    result = tool_ingest_run()
-    return {"message": "Ingest completed", "result": result}
+    if _INGEST_STATE["running"]:
+        return JSONResponse(
+            status_code=409,
+            content={"status": "already_running", "message": "Ingest už beží — pozri /api/ingest/status"},
+        )
+    _INGEST_STATE.update(
+        running=True,
+        last_started_at=datetime.now(timezone.utc).isoformat(),
+        last_result=None,
+        last_error=None,
+    )
+    background_tasks.add_task(_run_ingest_background)
+    return {"status": "started", "message": "Ingest beží na pozadí — sleduj /api/ingest/status"}
+
+@app.get("/api/ingest/status")
+async def ingest_status_view(
+    key_info: dict = Depends(verify_api_key),
+):
+    """Stav bežiaceho ingestu (idle / running / finished + posledný výsledok)."""
+    if not check_rate_limit(key_info):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    return _INGEST_STATE
 
 # ─── API Key Management (admin) ─────────────────────────────────────────────
 
