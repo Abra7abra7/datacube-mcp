@@ -467,5 +467,6 @@ if __name__ == "__main__":
     log.info("CORS allowed origins: %s", ALLOWED_ORIGINS if ALLOWED_ORIGINS != [""] else "*")
     log.info("Default rate limit: %s", RATE_LIMIT_DEFAULT)
     log.info("Starting on %s:%d", host, port)
+    log.info("DATAcube v1.0.1 — ready for action")
     
     uvicorn.run(app, host=host, port=port, log_level="info")
